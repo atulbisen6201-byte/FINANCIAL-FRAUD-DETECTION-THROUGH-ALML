@@ -1,0 +1,452 @@
+---
+title: 'Replication & extension of "_Fraud Detection using Machine Learning_" (Oza, 2018)'
+subtitle: "Machine learning strategy validation"
+author: "Salman Faris"
+date: "31 July 2024"
+format:
+  # pdf: default
+  html:
+    page-layout: full
+    self-contained: true
+    grid:
+      margin-width: 350px
+execute:
+  echo: fenced
+reference-location: margin
+# citation-location: margin
+tbl-cap-location: bottom
+toc: true
+bibliography: references.bib
+---
+
+# Introduction
+
+_Fraud Detection using Machine Learning_ [@oza2018] proposed a class weight strategy to tackle the problem of imbalanced classes in payments fraud detection. The author showed that choosing a suitable class weight in a classifier can be sufficient to flag fraud detections with a reasonably low false positive rate whilst maintaining high accuracy.
+
+We replicate all the experiments in the paper to validate this strategy. We further extend the paper by considering a rule-based machine learning algorithm and see if the results hold. We also introduce an additional metric to quantitatively measure the inference time of all the models to choose a suitable model to be used in a production setting.
+
+# Method
+
+We replicate the results of [@oza2018] using the same PaySim dataset [@paysim2016] and preprocessing steps, some of which were not specified in their paper but rather in their code (which unfortunately has been a common occurrence in our experience replicating machine learning papers).
+
+We found replicating the paper has been challenging due to several incomplete information which include:
+
+- Not specifying the RNG seed that was used in the paper. Only found in the GitHub repo.
+- Not specifying the hyperparameters used for each model. Only found in the GitHub repo.
+- Not specifying the range of class weights that was searched on. Only found in the GitHub repo.
+- Not specifying that a standard scaling step was used for training SVM with RBF kernel. This is an important step to make training SVM with RBF feasible and it was only discovered in the Github repo.
+- Not specifying the machine that was used for training despite mentioning an approximate time range for running the experiments collectively on their Github repo. Due to this, we were not able to gauge whether our training time should be lower or higher relative to their experiment.
+
+# Experimental evaluation
+
+## Setup
+
+We run our experiments on a MacBook Pro (2021) with the Apple M1 Pro chip - 16GB unified memory, 8-core CPU and 14-core GPU. Unfortunately, [@oza2018] did not specify the machine they used to train their models.
+
+We use our favorite number 10062930 for the RNG seed in all our experiments where randomness is required. Most particularly, we wanted the RNG seed to be different to that used by the original paper (seed=44) to ensure that the strategy they experimented on does not work purely due to random chance.
+
+## Dataset
+
+We use the same PaySim dataset referred by the paper, although the original link is found broken. The dataset can now be found on Kaggle at this [link](https://www.kaggle.com/datasets/ealaxi/paysim1) with the original methodology of the dataset described in [@paysim2016].
+
+We follow the exact same initial dataset preparation as in the paper, having the same train-val-test stratified split for both the TRANSFER and CASH OUT transactions. That means we obtain the exact same number of rowsets in each split as in [@oza2018]. The only difference is in the RNG seed that was used which means that the samples in each split may not be the same as in the paper.
+
+## Model training
+
+For all models, we mimic the hyperparameter used in the paper's Github repo where it is found and train the models on increasing class weights for the fraudulent samples.
+
+For training the SVM with RBF kernel, we employ the same standard scaling step as used in the paper's Github repo which was not specified in the paper. However, because of the large size for the CASH_OUT training dataset, we perform a stratified downsampling so that it is feasible to train the SVM classifier on our local machine within reasonable time. This may have reduced the performance of the SVM model. An alternative to replicate this training step is to use a cloud service like Google Cloud Platform (GCP) and do one of:
+
+1. Build a Cloud Function that trigger for each class weight and log the result with a Hive style format.
+2. Rent a Compute Engine with a lot of CPU cores and higher RAM size, and train in parallel there.
+3. Train via the GCP Vertex AI service, which for our purpose, is just a more expensive way to do [2] above.
+
+We also trained a decision tree classifier on both the datasets, considering that it is also a popular choice on tabular datasets. We found that the training and inference time for the decision tree rivals that of logistic regression, but can perform even better than the SVMs as we shall see in the next section.
+
+## Results
+
+We now discuss the results of our replication to validate the class weight strategy in [@oza2018].
+
+### PCA analysis on transaction covariates
+
+We were able to replicate the two-dimensional PCA decomposition very well as can be seen in @fig-pca. In particular, we recover the observation that there is higher variability in TRANSFER transactions when comparing the fraudulent and non-fraudulent transactions, suggesting that the dataset may be linearly separable.
+
+::: {#fig-pca layout-ncol=2}
+
+![TRANSFER](../../experimentation/reproduce_oza_2018/output/figures/pca/pca_TRANSFER.png){#fig-pca-TRANSFER}
+
+![CASH OUT](../../experimentation/reproduce_oza_2018/output/figures/pca/pca_CASH_OUT.png){#fig-pca-CASH_OUT}
+
+PCA decomposition of the transaction covariates for the TRANSFER and CASH OUT datasets.
+:::
+
+### Finding the ideal class weight
+
+Next, we look at evaluating the precision and recall metrics on the validation set to find the ideal class weight.
+
+::: {#fig-CV-curves-CASH_OUT layout-ncol=2 layout-nrow=2}
+
+![Logistic regression](../../experimentation/reproduce_oza_2018/output/figures/result_class_weight/result_CASH_OUT_logreg.png){#fig-log}
+
+![SVM + linear kernel](../../experimentation/reproduce_oza_2018/output/figures/result_class_weight/result_CASH_OUT_svc_linear.png){#fig-svm-linear}
+
+![SVM + RBF kernel](../../experimentation/reproduce_oza_2018/output/figures/result_class_weight/result_CASH_OUT_svc_rbf.png){#fig-svm-rbf}
+
+![Decision tree](../../experimentation/reproduce_oza_2018/output/figures/result_class_weight/result_CASH_OUT_decision_tree.png){#fig-decision-tree}
+
+Performance metrics - Precision, Recall, FPR (False Positive Rate) – versus fraudulent class weights on the CASH OUT validation set, marked with the chosen ideal class weight.
+:::
+
+The false positive rate metric is new and were not present in [@oza2018], but it was still used implicitly for determining the ideal class weight so here we make it obvious. Again, we recall that the ideal class weight is chosen to be the one that bounds the FPR to less than 1% to ensure a good user experience while simulatenously maximizing the recall. We also have added the decision tree performance metrics here which were not present in [@oza2018].
+
+In both the CASH OUT and TRANSFER validation splits (see @fig-CV-curves-CASH_OUT and @fig-CV-curves-TRANSFER respectively), we capture the same trend as found in [@oza2018] where increasing the fraudulent class weight leads to a higher recall at the cost of lower precision. This means that the model has a higher tendency of marking actual fraudulent transactions at the cost of marking non-fraudulent transactions as fraudulent. So you would reduce monetary cost due to fraud but risk losing customers due to a terrible user experience.
+
+We were also able to replicate the reduced effect in performance metrics with increasing class weights in the TRANSFER validation set where a high recall of ~1.0 is attained for even very low class weights. As seen in @fig-CV-curves-TRANSFER-decision-tree, this same trend is also observed for the newly added decision tree although this model performs much better with precision not dropping below 60% unlike the other models.
+
+::: {#fig-CV-curves-TRANSFER layout-ncol=2 layout-nrow=2}
+
+![Logistic regression](../../experimentation/reproduce_oza_2018/output/figures/result_class_weight/result_TRANSFER_logreg.png){#fig-log}
+
+![SVM + linear kernel](../../experimentation/reproduce_oza_2018/output/figures/result_class_weight/result_TRANSFER_svc_linear.png){#fig-svm-linear}
+
+![SVM + RBF kernel](../../experimentation/reproduce_oza_2018/output/figures/result_class_weight/result_TRANSFER_svc_rbf.png){#fig-svm-rbf}
+
+![Decision tree](../../experimentation/reproduce_oza_2018/output/figures/result_class_weight/result_TRANSFER_decision_tree.png){#fig-CV-curves-TRANSFER-decision-tree}
+
+Performance metrics - Precision, Recall, FPR (False Positive Rate) – versus fraudulent class weights on the TRANSFER validation set, marked with the chosen ideal class weight.
+:::
+
+The ideal class weights for all trained models are captured in @tbl-ideal-class-weight. We were surprised to not be able to replicate the ideal class weights in the original paper which makes us wonder if there were additional manual steps involved in choosing their ideal class weight – for example, they mentioned about choosing "higher weights for fraud samples to avoid over-fitting on CV set". If there were no additional steps involved in the original paper, we argue that the difference in ideal class weight may arise due to the possibly different rowsets in the training and validation sets as we used a different RNG seed compared to the author. This can imply a different probability distribution in the covariates which may lead to lower/higher class weights required to filter the fraudulent transactions optimally given the covariates.
+
+This difference in ideal class weight warrants some attention and should be investigated further. That being said, our choice of ideal class weight is better in that we attain similar recall values for all models whilst also attaining high precision values relative to the ones attained in the original paper. This difference is captured in @tbl-metrics-and-auprc-VALIDATION.
+
+::: {#tbl-ideal-class-weight layout-ncol=2 layout-nrow=2}
+| Algorithm           | Ideal class weight |
+| ------------------- | :----------------: |
+| Logistic Regression |         14         |
+| Linear SVM          |         12         |
+| SVM with RBF kernel |         13         |
+| Decision Tree       |        305         |
+
+: Replication (ours) – **TRANSFER** {#tbl-replication-icw-TRANSFER}
+
+| Algorithm           | Ideal class weight |
+| ------------------- | :----------------: |
+| Logistic Regression |         70         |
+| Linear SVM          |         39         |
+| SVM with RBF kernel |         16         |
+| Decision Tree       |        N/A         |
+
+: Original results – **TRANSFER** {#tbl-original-icw-TRANSFER}
+
+| Algorithm           | Ideal class weight |
+| ------------------- | :----------------: |
+| Logistic Regression |        124         |
+| Linear SVM          |        112         |
+| SVM with RBF kernel |         81         |
+| Decision Tree       |         30         |
+
+: Replication (ours) – **CASH OUT** {#tbl-replication-icw-CASH_OUT}
+
+| Algorithm           | Ideal class weight |
+| ------------------- | :----------------: |
+| Logistic Regression |        145         |
+| Linear SVM          |        132         |
+| SVM with RBF kernel |        128         |
+| Decision Tree       |        N/A         |
+
+: Original results – **CASH OUT** {#tbl-original-icw-CASH_OUT}
+
+Ideal class weights for **TRANSFER** and **CASH OUT**.
+:::
+
+### Comparing performance between ideal models
+
+To compare between-model performance, we now plot the precision-recall curves for all the models on the training, validation and test sets and compare the AUPRC (Area Under the Precision-Recall Curve) values. The choice of using the precision-recall curve as opposed to an ROC curve when the target binary class is imbalanced is quite well known in the literature so we will not go into details here and we agree with the author. In general, we were able to replicate the shape of the precision-recall curve for both transaction types. However, we observe sharper precision hiccup drops as compared to the author when training the SVM with RBF kernel, possibly owing to the fact that we have different validation rowsets.
+
+::: {#fig-model-comparison-TRANSFER layout-ncol=3}
+
+![Train](../../experimentation/reproduce_oza_2018/output/figures/result_model_comparison/model_comparison_TRANSFER_train.png){#fig-metric-1}
+
+![Validation](../../experimentation/reproduce_oza_2018/output/figures/result_model_comparison/model_comparison_TRANSFER_validation.png){#fig-metric-1}
+
+![Test](../../experimentation/reproduce_oza_2018/output/figures/result_model_comparison/model_comparison_TRANSFER_test.png){#fig-metric-1}
+
+Precision-Recall Curve and computed AUPRC for the TRANSFER dataset.
+:::
+
+::: {#fig-model-comparison-CASH_OUT layout-ncol=3}
+
+![Train](../../experimentation/reproduce_oza_2018/output/figures/result_model_comparison/model_comparison_CASH_OUT_train.png){#fig-metric-1}
+
+![Validation](../../experimentation/reproduce_oza_2018/output/figures/result_model_comparison/model_comparison_CASH_OUT_validation.png){#fig-metric-1}
+
+![Test](../../experimentation/reproduce_oza_2018/output/figures/result_model_comparison/model_comparison_CASH_OUT_test.png){#fig-metric-1}
+
+Precision-Recall Curve and computed AUPRC for the CASH OUT dataset.
+:::
+
+We summarize all our metrics in the following tables.
+
+::: {#tbl-metrics-and-auprc-VALIDATION layout-ncol=2 layout-nrow=2}
+| Algorithm           | Recall | Precision | F1     | AUPRC  |
+| ------------------- | ------ | --------- | ------ | ------ |
+| Logistic Regression | 0.9935 | 0.8243    | 0.9010 | 0.9606 |
+| Linear SVM          | 0.9935 | 0.7421    | 0.8500 | 0.9496 |
+| SVM with RBF kernel | 0.9870 | 0.7172    | 0.8307 | 0.9717 |
+| Decision Tree       | 0.9935 | 0.6308    | 0.7717 | 0.9896 |
+
+: Replication (ours) – **TRANSFER** {#tbl-replication-metrics-TRANSFER}
+
+| Algorithm           | Recall | Precision | F1     | AUPRC  |
+| ------------------- | ------ | --------- | ------ | ------ |
+| Logistic Regression | 0.9983 | 0.4416    | 0.6123 | 0.9248 |
+| Linear SVM          | 0.9983 | 0.4432    | 0.6139 | 0.9161 |
+| SVM with RBF kernel | 0.9934 | 0.5871    | 0.7381 | 0.9855 |
+| Decision Tree       | N/A    | N/A       | N/A    | N/A    |
+
+: Original results – **TRANSFER** {#tbl-original-metrics-TRANSFER}
+
+
+| Algorithm           | Recall | Precision | F1     | AUPRC  |
+| ------------------- | ------ | --------- | ------ | ------ |
+| Logistic Regression | 0.9870 | 0.1565    | 0.2702 | 0.7620 |
+| Linear SVM          | 0.9011 | 0.1440    | 0.2483 | 0.7027 |
+| SVM with RBF kernel | 0.9011 | 0.1483    | 0.2546 | 0.7674 |
+| Decision Tree       | 0.6742 | 0.1906    | 0.2971 | 0.5838 |
+
+: Replication (ours) – **CASH OUT** {#tbl-replication-metrics-CASH_OUT}
+
+| Algorithm           | Recall | Precision | F1     | AUPRC  |
+| ------------------- | ------ | --------- | ------ | ------ |
+| Logistic Regression | 0.9822 | 0.1561    | 0.2692 | 0.7235 |
+| Linear SVM          | 0.9352 | 0.1263    | 0.2226 | 0.6727 |
+| SVM with RBF kernel | 0.9773 | 0.1315    | 0.2318 | 0.7598 |
+| Decision Tree       | N/A    | N/A       | N/A    | N/A    |
+
+: Original results – **CASH OUT** {#tbl-original-metrics-CASH_OUT}
+
+Recall, Precision, F1-score and AUPRC for the chosen model (with ideal class weights) on the **validation** set.
+:::
+
+::: {#tbl-metrics-and-auprc-TEST layout-ncol=2 layout-nrow=2}
+| Algorithm           | Recall | Precision | F1     | AUPRC  |
+| ------------------- | ------ | --------- | ------ | ------ |
+| Logistic Regression | 0.9967 | 0.8351    | 0.9088 | 0.9705 |
+| Linear SVM          | 0.9983 | 0.7488    | 0.8557 | 0.9585 |
+| SVM with RBF kernel | 0.9870 | 0.7009    | 0.8197 | 0.9747 |
+| Decision Tree       | 0.9935 | 0.6513    | 0.7869 | 0.9898 |
+
+: Replication (ours) – **TRANSFER** {#tbl-replication-metrics-TEST-TRANSFER}
+
+| Algorithm           | Recall | Precision | F1     | AUPRC  |
+| ------------------- | ------ | --------- | ------ | ------ |
+| Logistic Regression | 0.9951 | 0.4444    | 0.6144 | 0.9063 |
+| Linear SVM          | 0.9951 | 0.4516    | 0.6213 | 0.8949 |
+| SVM with RBF kernel | 0.9886 | 0.5823    | 0.7329 | 0.9873 |
+| Decision Tree       | N/A    | N/A       | N/A    | N/A    |
+
+: Original results – **TRANSFER** {#tbl-original-metrics-TEST-TRANSFER}
+
+
+| Algorithm           | Recall | Precision | F1     | AUPRC  |
+| ------------------- | ------ | --------- | ------ | ------ |
+| Logistic Regression | 0.9806 | 0.1548    | 0.2673 | 0.7466 |
+| Linear SVM          | 0.8849 | 0.1436    | 0.2471 | 0.6827 |
+| SVM with RBF kernel | 0.8930 | 0.1461    | 0.2511 | 0.7462 |
+| Decision Tree       | 0.6370 | 0.1829    | 0.2843 | 0.5521 |
+
+: Replication (ours) – **CASH OUT** {#tbl-replication-metrics-TEST-CASH_OUT}
+
+| Algorithm           | Recall | Precision | F1     | AUPRC  |
+| ------------------- | ------ | --------- | ------ | ------ |
+| Logistic Regression | 0.9886 | 0.1521    | 0.2636 | 0.7403 |
+| Linear SVM          | 0.9411 | 0.1246    | 0.2201 | 0.6893 |
+| SVM with RBF kernel | 0.9789 | 0.1321    | 0.2327 | 0.7271 |
+| Decision Tree       | N/A    | N/A       | N/A    | N/A    |
+
+: Original results – **CASH OUT** {#tbl-original-metrics-TEST-CASH_OUT}
+
+Recall, Precision, F1-score and AUPRC for the chosen model (with ideal class weights) on the **test** set.
+:::
+
+When comparing the models between logistic regression, SVM with linear kernel and the SVM with the RBF kernel, we were able to replicate the original results on the TRANSFER transactions in both the train and test sets. We observe recall scores attaining close to 99% for all three models and the SVM with RBF kernel yielding the highest AUPRC score similar to [@oza2018]. With the added decision tree, we also attain a recall score of around 99% but with a lower precision relative to the other three models. However, we observe decision tree to have the highest AUPRC score beating the SVM with RBF kernel suggesting that the decision tree might be a better fraud detector in TRANSFER transactions.
+
+We were also able to replicate the drop in precision when performing inference using the three models on CASH OUT transactions, relative to the TRANSFER transactions. This can be attributed due to the non-linear separability of the transactions (ref. @fig-pca). We did not, however, obtain the same recall performance when using the SVM with RBF kernel but this is explained by our additional step of stratified downsampling the CASH OUT training set for model training due to our compute limitation. Despite that, we still saw a higher AUPRC in SVM with RBF kernel as compared to logistic regression and the SVM with linear kernel, similar to the paper. Unlike detecting fraud in TRANSFER transactions, the decision tree does not perform as well in the CASH OUT transactions with significantly lower recall and AUPRC when compared even to the worst of the three original models. However, we saw that the decision tree have a higher precision albeit only slightly suggesting that it can contribute to better user experience.
+
+::: {#tbl-confusion-matrix-TRANSFER layout-ncol=2 layout-nrow=2}
+| Actual ⬇️ / Predicted ➡️ | Fraud | Not fraud |
+| ---------------------- | ----- | --------- |
+| **Fraud**              | 79201 | 121       |
+| **Not fraud**          | 2     | 613       |
+
+: Logistic Regression {#tbl-confusion-matrix-TRANSFER-logreg}
+
+| Actual ⬇️ / Predicted ➡️ | Fraud | Not fraud |
+| ---------------------- | ----- | --------- |
+| **Fraud**              | 79116 | 206       |
+| **Not fraud**          | 4     | 611       |
+
+: SVM with Linear kernel {#tbl-confusion-matrix-TRANSFER-svm-linear}
+
+| Actual ⬇️ / Predicted ➡️ | Fraud | Not fraud |
+| ---------------------- | ----- | --------- |
+| **Fraud**              | 79063 | 259       |
+| **Not fraud**          | 8     | 607       |
+
+: SVM with RBF kernel {#tbl-confusion-matrix-TRANSFER-svm-rbf}
+
+| Actual ⬇️ / Predicted ➡️ | Fraud | Not fraud |
+| ---------------------- | ----- | --------- |
+| **Fraud**              | 78995 | 327       |
+| **Not fraud**          | 4     | 611       |
+
+: Decision Tree {#tbl-confusion-matrix-TRANSFER-decision-tree}
+
+Confusion matrix evaluation on **TRANSFER** test set transactions
+:::
+
+::: {#tbl-confusion-matrix-CASH_OUT layout-ncol=2 layout-nrow=2}
+| Actual ⬇️ / Predicted ➡️ | Fraud  | Not fraud |
+| ---------------------- | ------ | --------- |
+| **Fraud**              | 331704 | 3304      |
+| **Not fraud**          | 12     | 605       |
+
+: Logistic Regression {#tbl-confusion-matrix-CASH_OUT-logreg}
+
+| Actual ⬇️ / Predicted ➡️ | Fraud  | Not fraud |
+| ---------------------- | ------ | --------- |
+| **Fraud**              | 331752 | 3256      |
+| **Not fraud**          | 71     | 546       |
+
+: SVM with Linear kernel {#tbl-confusion-matrix-CASH_OUT-svm-linear}
+
+| Actual ⬇️ / Predicted ➡️ | Fraud  | Not fraud |
+| ---------------------- | ------ | --------- |
+| **Fraud**              | 331788 | 3220      |
+| **Not fraud**          | 66     | 551       |
+
+: SVM with RBF kernel {#tbl-confusion-matrix-CASH_OUT-svm-rbf}
+
+| Actual ⬇️ / Predicted ➡️ | Fraud  | Not fraud |
+| ---------------------- | ------ | --------- |
+| **Fraud**              | 333253 | 1755      |
+| **Not fraud**          | 224    | 393       |
+
+: Decision Tree {#tbl-confusion-matrix-CASH_OUT-decision-tree}
+
+Confusion matrix evaluation on **CASH OUT** test set transactions
+:::
+
+We were able to replicate the confusion matrices on the TRANSFER test set transactions (see @tbl-confusion-matrix-TRANSFER), detecting more than 600 fraudulent transactions for all the models and falsely predicting a non-fraudulent transaction as fraud for less than 1 percent. In fact, the false positive rate is at most 0.01% with the highest attained by the SVM with RBF kernel. Unlike the paper, we also display the confusion matrices on the CASH OUT test set transactions (see @tbl-confusion-matrix-CASH_OUT) which saw a less impressive performance. That being said, the key objective of maintaining a low false positive rate is attained with the worst model (decision tree) having only about 0.07% false positive rate.
+
+### New: comparing inference time between ideal models
+
+Core to our exploration is to deploy the trained models for live fraudulent transaction detection. We will now compare the inference time of the four models on both the TRANSFER and CASH OUT transactions.
+
+To measure the inference time, we use the `timeit.repeat` funtion from the `timeit` built-in Python package. Here we run inference for a 1000 times and record the average time taken. We repeat this procedure for 100 times to obtain 100 average inference times. Our results are captured in @tbl-inference-time and KDE plots in @fig-inference-time-nsample.
+
+::: {#fig-inference-time-nsample layout-ncol=2 layout-nrow=3}
+
+![n=1 point sampled from **TRANSFER**](../../experimentation/reproduce_oza_2018/output/figures/result_inference_speed/hist_TRANSFER_1.png){#fig-inference-time-TRANSFER-nsample-1}
+
+![n=1 point sampled from **CASH OUT**](../../experimentation/reproduce_oza_2018/output/figures/result_inference_speed/hist_CASH_OUT_1.png){#fig-inference-time-CASH_OUT-nsample-1}
+
+![n=10 points sampled from **TRANSFER**](../../experimentation/reproduce_oza_2018/output/figures/result_inference_speed/hist_TRANSFER_10.png){#fig-inference-time-TRANSFER-nsample-10}
+
+![n=10 points sampled from **CASH OUT**](../../experimentation/reproduce_oza_2018/output/figures/result_inference_speed/hist_CASH_OUT_10.png){#fig-inference-time-CASH_OUT-nsample-10}
+
+![n=100 points sampled from **TRANSFER**](../../experimentation/reproduce_oza_2018/output/figures/result_inference_speed/hist_TRANSFER_100.png){#fig-inference-time-TRANSFER-nsample-100}
+
+![n=100 points sampled from **CASH OUT**](../../experimentation/reproduce_oza_2018/output/figures/result_inference_speed/hist_CASH_OUT_100.png){#fig-inference-time-CASH_OUT-nsample-100}
+
+KDE plot of model inference time (seconds) for different number of sample points (n = 1, 10, 100).
+:::
+
+::: {#tbl-inference-time layout-ncol=2 layout-nrow=3}
+| Algorithm           | Sample size | Inference time |
+| ------------------- | ----------- | -------------- |
+| Logistic Regression | 1           | 0.27 ± 0.02    |
+| Linear SVM          | 1           | 0.26 ± 0.02    |
+| SVM with RBF kernel | 1           | 0.34 ± 0.03    |
+| Decision Tree       | 1           | 0.30 ± 0.07    |
+
+: Inference time on **TRANSFER** transactions with n=1 sample point {#tbl-inference-time-TRANSFER-nsample-1}
+
+| Algorithm           | Sample size | Inference time |
+| ------------------- | ----------- | -------------- |
+| Logistic Regression | 1           | 0.28 ± 0.06    |
+| Linear SVM          | 1           | 0.27 ± 0.01    |
+| SVM with RBF kernel | 1           | 0.52 ± 0.07    |
+| Decision Tree       | 1           | 0.28 ± 0.01    |
+
+: Inference time on **CASH OUT** transactions with n=1 sample point {#tbl-inference-time-CASH_OUT-nsample-1}
+
+| Algorithm           | Sample size | Inference time |
+| ------------------- | ----------- | -------------- |
+| Logistic Regression | 10          | 0.29 ± 0.08    |
+| Linear SVM          | 10          | 0.27 ± 0.03    |
+| SVM with RBF kernel | 10          | 2.95 ± 0.18    |
+| Decision Tree       | 10          | 0.26 ± 0.01    |
+
+: Inference time on **TRANSFER** transactions with n=10 sample points {#tbl-inference-time-TRANSFER-nsample-10}
+
+| Algorithm           | Sample size | Inference time |
+| ------------------- | ----------- | -------------- |
+| Logistic Regression | 10          | 0.27 ± 0.02    |
+| Linear SVM          | 10          | 0.28 ± 0.06    |
+| SVM with RBF kernel | 10          | 4.56 ± 0.05    |
+| Decision Tree       | 10          | 0.28 ± 0.01    |
+
+: Inference time on **CASH OUT** transactions with n=10 sample points {#tbl-inference-time-CASH_OUT-nsample-10}
+
+| Algorithm           | Sample size | Inference time |
+| ------------------- | ----------- | -------------- |
+| Logistic Regression | 100         | 0.26 ± 0.01    |
+| Linear SVM          | 100         | 0.26 ± 0.02    |
+| SVM with RBF kernel | 100         | 28.12 ± 0.48   |
+| Decision Tree       | 100         | 0.28 ± 0.02    |
+
+: Inference time on **TRANSFER** transactions with n=100 sample points {#tbl-inference-time-TRANSFER-nsample-100}
+
+| Algorithm           | Sample size | Inference time |
+| ------------------- | ----------- | -------------- |
+| Logistic Regression | 100         | 0.27 ± 0.01    |
+| Linear SVM          | 100         | 0.26 ±  0.00   |
+| SVM with RBF kernel | 100         | 44.43 ± 0.52   |
+| Decision Tree       | 100         | 0.27 ± 0.01    |
+
+: Inference time on **CASH OUT** transactions with n=100 sample points {#tbl-inference-time-CASH_OUT-nsample-100}
+
+Inference time (seconds) for different number of sample points (n = 1, 10, 100).
+:::
+
+For TRANSFER transactions, we observe that inference time with n=1 sample point is relatively comparable for all models with the decision tree having a bigger variance. However, as n gets larger to 10 and 100, there is a stark difference in inference time for SVM with RBF kernel as compared to the other three models. In particular, we observe that the inference time for SVM with RBF kernel scales linearly with the number of sample points which is terrible.
+
+In the CASH OUT transactions, we observe poor inference time speeds in the SVM with RBF kernel even for n=1 sample point, with problem aggrevating for larger n as we have seen in TRANSFER transactions.
+
+Considering both classification performance and inference time, it is thus unfavourable to choose the SVM with RBF kernel due to the massive latency it introduce despite its performance. For production, latency is key and does not only affect user experience, but also would increase the hidden cloud provider cost for actually running the inference. 
+
+To this end, we opt for the simple logistic regression for inference on both TRANSFER and CASH OUT transactions. For the CASH OUT transactions, it is straightforward now to opt for the simple logistic regression given its superior performance and inference time. For the TRANSFER transactions, while the decision tree have the highest AUPRC, it has a much lower precision as compared to logistic regression, and in terms of recall these two models perform very similarly. In our case, recall and precision are more important and translates directly into business values so it is important to have a model that can perform well on both.
+
+# Conclusion
+
+Overall, we are able to confirm that the class weight strategy proposed by @oza2018 does work for detecting low-occurence fraudulent transactions with high recall whilst maintaining a significantly low false positive rate. However, as we have discussed in this report, the ideal class weight difference between the replication and the original warrants more attention.
+
+To summarize, our key contributions in this replication are as follows:
+
+- **Replication** – We replicate the original paper and provide a detailed analysis of the results. We show that the class weight strategy indeed work.
+- **Modularity** – We provide a modular implementation of all the models, metrics and evaluation so that it is plug-and-play if we were to add a new experiment.
+- **Efficiency** – We introduce parallelism to train the models and perform metric evaluation across all considered class weights.
+- **Deployment in mind** – We introduce a new experiment to measure inference time for all models to account for the performance-latency tradeoff.
+
+There are several directions to go from here:
+
+- One direction that we are particularly keen is to see how the ideal class weight strategy with varying random seeds to see if there is any impact.
+- One clear next direction to take is to make use of the time series component of the PaySim dataset as these transactions are time-dependent and there can be something useful there. 
+- Another direction is to run the same set of experiments on another financial transactions dataset (please hit me up if you have an interesting dataset!).
+
+# References
+
+::: {#refs}
+:::
